@@ -8,7 +8,7 @@
 #define FIRMWARE_VER_CODE 10
 
 #ifndef FIRMWARE_BUILD_DATE
-#define FIRMWARE_BUILD_DATE "20 Mar 2026"
+#define FIRMWARE_BUILD_DATE "Mesh-Up.NL"
 #endif
 
 #ifndef FIRMWARE_VERSION
