@@ -233,6 +233,15 @@ public:
         display.setTextSize(2);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());
         display.drawTextCentered(display.width() / 2, 43, tmp);
+
+        // Add custom Helper (Mesh-Up.NL)
+        display.setTextSize(1);
+        sprintf(tmp, "Open de MeshCore app");
+        display.drawTextCentered(display.width() / 2, 60, tmp);
+        sprintf(tmp, "en verbind via");
+        display.drawTextCentered(display.width() / 2, 72, tmp);
+        sprintf(tmp, "Bluetooth");
+        display.drawTextCentered(display.width() / 2, 84, tmp);
       }
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
