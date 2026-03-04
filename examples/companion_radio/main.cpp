@@ -2,6 +2,10 @@
 #include <Mesh.h>
 #include "MyMesh.h"
 
+#if defined(SHIPPING_MODE_ENABLED) && defined(ESP32)
+  #include <esp_sleep.h>
+#endif
+
 // Believe it or not, this std C function is busted on some platforms!
 static uint32_t _atoi(const char* sp) {
   uint32_t n = 0;
@@ -101,6 +105,181 @@ MyMesh the_mesh(radio_driver, fast_rng, rtc_clock, tables, store
 
 /* END GLOBAL OBJECTS */
 
+#ifdef SHIPPING_MODE_ENABLED
+
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  #define SHIP_FS InternalFS
+#elif defined(RP2040_PLATFORM)
+  #define SHIP_FS LittleFS
+#elif defined(ESP32)
+  #define SHIP_FS SPIFFS
+#endif
+
+// SHIPPING_BUILD_STAMP is set to $UNIX_TIME by platformio.ini, ensuring a
+// unique value per build even for incremental builds (forces recompilation).
+#ifdef SHIPPING_BUILD_STAMP
+  #define _SHIP_STR(x) #x
+  #define SHIP_STR(x) _SHIP_STR(x)
+  static const char SHIPPING_BUILD_ID[] = SHIP_STR(SHIPPING_BUILD_STAMP);
+#else
+  static const char SHIPPING_BUILD_ID[] = __DATE__ " " __TIME__;
+#endif
+
+// If firmware changed since last boot, delete the unlock file so shipping mode re-activates.
+static void shippingCheckNewFirmware() {
+  char buf[sizeof(SHIPPING_BUILD_ID)] = {0};
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  File f = SHIP_FS.open("/shipping_build_id", FILE_O_READ);
+#elif defined(RP2040_PLATFORM)
+  File f = SHIP_FS.open("/shipping_build_id", "r");
+#else
+  File f = SHIP_FS.open("/shipping_build_id", "r", false);
+#endif
+  if (f) {
+    f.read((uint8_t*)buf, sizeof(buf) - 1);
+    f.close();
+    if (strcmp(buf, SHIPPING_BUILD_ID) == 0) return;  // same firmware
+  }
+  // New firmware (or first boot) — remove unlock file and write new build ID
+  SHIP_FS.remove("/shipping_unlocked");
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  SHIP_FS.remove("/shipping_build_id");
+  File fw = SHIP_FS.open("/shipping_build_id", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  File fw = SHIP_FS.open("/shipping_build_id", "w");
+#else
+  File fw = SHIP_FS.open("/shipping_build_id", "w", true);
+#endif
+  if (fw) { fw.write((const uint8_t*)SHIPPING_BUILD_ID, strlen(SHIPPING_BUILD_ID)); fw.close(); }
+}
+
+static bool shippingUnlockFileExists() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  File f = SHIP_FS.open("/shipping_unlocked", FILE_O_READ);
+#elif defined(RP2040_PLATFORM)
+  File f = SHIP_FS.open("/shipping_unlocked", "r");
+#else
+  File f = SHIP_FS.open("/shipping_unlocked", "r", false);
+#endif
+  if (f) { f.close(); return true; }
+  return false;
+}
+
+static void shippingWriteUnlockFile() {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  SHIP_FS.remove("/shipping_unlocked");
+  File f = SHIP_FS.open("/shipping_unlocked", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  File f = SHIP_FS.open("/shipping_unlocked", "w");
+#else
+  File f = SHIP_FS.open("/shipping_unlocked", "w", true);
+#endif
+  if (f) { f.write((uint8_t)1); f.close(); }
+}
+
+static void shippingModeSleep() {
+  // E-ink retains its image without power — just cut display controller power
+#ifdef DISPLAY_CLASS
+  display.turnOff();
+#endif
+
+#if defined(ESP32) && defined(PIN_USER_BTN)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_USER_BTN, 0);
+  esp_deep_sleep_start();
+#elif defined(NRF52_PLATFORM) && defined(PIN_USER_BTN)
+  // Configure GPIO sense so button press wakes from SYSTEMOFF.
+  // SYSTEMOFF draws ~0.3 µA. Wake triggers a full reboot.
+  // PIN_USER_BTN (GPIO 42) is NOT the RESET button, so the Adafruit
+  // bootloader will not enter DFU — it only checks for double-tap RESET.
+  nrf_gpio_cfg_sense_input(PIN_USER_BTN,
+    NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
+  board.powerOff();  // turns off LEDs, backlight, PWR_EN, then sd_power_system_off()
+#else
+  board.powerOff();
+#endif
+
+  while(1) { delay(1000); }  // should never reach here
+}
+
+static void checkShippingMode() {
+  shippingCheckNewFirmware();
+  if (shippingUnlockFileExists()) return;
+
+#ifdef PIN_USER_BTN
+  pinMode(PIN_USER_BTN, INPUT_PULLUP);
+
+  // Draw unlock prompt — on e-ink this persists across SYSTEMOFF sleeps
+#ifdef DISPLAY_CLASS
+  display.startFrame();
+  display.setTextSize(2);
+  display.drawTextCentered(display.width()/2, 10, "Installeer eerst");
+  display.drawTextCentered(display.width()/2, 25, "de Antenne !");
+  display.setTextSize(1);
+  display.drawTextCentered(display.width()/2, 62, "Daarna de onderste");
+  display.drawTextCentered(display.width()/2, 74, "knop 3s inhouden om");
+  display.drawTextCentered(display.width()/2, 86, "te ontgrendelen");
+  display.setTextSize(2);
+  display.drawTextCentered(10, 110, "<<");
+  display.endFrame();
+#endif
+
+  // Wait up to 5s for a 3-second continuous hold
+  unsigned long start = millis();
+  unsigned long held_since = 0;
+  const unsigned long UNLOCK_HOLD_MS = 3000;
+  const unsigned long WAIT_TIMEOUT_MS = 30000;
+
+  while (millis() - start < WAIT_TIMEOUT_MS) {
+    bool pressed = (digitalRead(PIN_USER_BTN) == LOW);
+
+    if (pressed) {
+      if (held_since == 0) held_since = millis();
+
+      if (millis() - held_since >= UNLOCK_HOLD_MS) {
+        shippingWriteUnlockFile();
+
+        #ifdef DISPLAY_CLASS
+          display.startFrame();
+          display.setTextSize(2);
+          display.drawTextCentered(display.width()/2, 28, "Ontgrendeld!");
+          display.endFrame();
+          delay(1000);
+        #endif
+
+        board.reboot();
+        while(1);
+      }
+    } else {
+      held_since = 0;
+    }
+
+    delay(50);
+  }
+
+  // Timeout — show shutoff message on e-ink before sleeping
+  #ifdef DISPLAY_CLASS
+    display.startFrame();
+    display.setTextSize(1);
+    display.drawTextCentered(display.width()/2, 10, "<< Druk op deze knop");
+    display.drawTextCentered(display.width()/2, 22, "om te starten");
+    display.setTextSize(2);
+    display.drawTextCentered(display.width()/2, 50, "Slaapstand...");
+    display.endFrame();
+  #endif
+#endif
+
+  // Button not held long enough (or no button) — deep sleep.
+  // On NRF52: SYSTEMOFF (~0.3 µA), e-ink retains message. Button wakes as full reboot.
+  // On ESP32: deep sleep with GPIO wake.
+  shippingModeSleep();
+}
+
+#if !defined(PIN_USER_BTN)
+  #warning "SHIPPING_MODE_ENABLED but PIN_USER_BTN not defined - device cannot be unlocked via button"
+#endif
+
+#endif // SHIPPING_MODE_ENABLED
+
 void halt() {
   while (1) ;
 }
@@ -141,6 +320,9 @@ void setup() {
       ExtraFS.begin();
   #endif
   #endif
+#ifdef SHIPPING_MODE_ENABLED
+  checkShippingMode();
+#endif
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
@@ -158,6 +340,9 @@ void setup() {
   the_mesh.startInterface(serial_interface);
 #elif defined(RP2040_PLATFORM)
   LittleFS.begin();
+#ifdef SHIPPING_MODE_ENABLED
+  checkShippingMode();
+#endif
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
@@ -184,6 +369,9 @@ void setup() {
     the_mesh.startInterface(serial_interface);
 #elif defined(ESP32)
   SPIFFS.begin(true);
+#ifdef SHIPPING_MODE_ENABLED
+  checkShippingMode();
+#endif
   store.begin();
   the_mesh.begin(
     #ifdef DISPLAY_CLASS
