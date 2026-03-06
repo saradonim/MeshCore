@@ -264,6 +264,8 @@ static void checkShippingMode() {
     display.drawTextCentered(display.width()/2, 22, "om te starten");
     display.setTextSize(2);
     display.drawTextCentered(display.width()/2, 50, "Slaapstand...");
+    display.setTextSize(1);
+    display.drawTextCentered(display.width()/2, 80, "Sluit eerst de USB aan!");
     display.endFrame();
   #endif
 #endif
