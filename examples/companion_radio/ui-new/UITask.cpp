@@ -587,6 +587,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
 #ifdef PIN_BUZZER
   buzzer.begin();
+  // Let startup melody finish before applying quiet preference
+  uint32_t bz_t = millis();
+  while (buzzer.isPlaying() && (millis() - bz_t) < 2500) buzzer.loop();
   buzzer.quiet(_node_prefs->buzzer_quiet);
 #endif
 
@@ -699,6 +702,7 @@ void UITask::shutdown(bool restart){
      or we can set a flag and delay the shutdown for a couple of seconds
      while a non-blocking buzzer.loop() plays out in UITask::loop()
   */
+  buzzer.quiet(false);  // always enable buzzer for shutdown sound
   buzzer.shutdown();
   uint32_t buzzer_timer = millis(); // fail-safe shutdown
   while (buzzer.isPlaying() && (millis() - 2500) < buzzer_timer)
@@ -942,8 +946,11 @@ void UITask::toggleBuzzer() {
   #ifdef PIN_BUZZER
     if (buzzer.isQuiet()) {
       buzzer.quiet(false);
-      notify(UIEventType::ack);
+      buzzer.play("on:d=16,o=5,b=160:c,c6");   // low→high = ON
     } else {
+      buzzer.play("off:d=16,o=6,b=160:c,c5");  // high→low = OFF
+      uint32_t t = millis();
+      while (buzzer.isPlaying() && (millis() - t) < 500) buzzer.loop();
       buzzer.quiet(true);
     }
     _node_prefs->buzzer_quiet = buzzer.isQuiet();

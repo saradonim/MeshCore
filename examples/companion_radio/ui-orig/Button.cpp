@@ -34,7 +34,7 @@ void Button::update() {
     }
     
     // Debounce check
-    if ((now - _stateChangeTime) > BUTTON_DEBOUNCE_TIME_MS) {
+    if ((now - _stateChangeTime) >= BUTTON_DEBOUNCE_TIME_MS) {
         if (newState != _currentState) {
             _currentState = newState;
             handleStateChange();
