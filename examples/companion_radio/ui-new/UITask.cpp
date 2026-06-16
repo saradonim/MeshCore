@@ -583,11 +583,12 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
 #ifdef PIN_BUZZER
   buzzer.begin();
-  // Let startup melody finish before applying quiet preference
+  // Play the startup chime while still audible (begin() leaves the buzzer un-quiet),
+  // let it finish, then apply the saved/default quiet preference.
+  buzzer.startup();
   uint32_t bz_t = millis();
   while (buzzer.isPlaying() && (millis() - bz_t) < 2500) buzzer.loop();
   buzzer.quiet(_node_prefs->buzzer_quiet);
-  buzzer.startup();
 #endif
 
 #ifdef PIN_VIBRATION
